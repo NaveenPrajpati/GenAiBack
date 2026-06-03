@@ -1,0 +1,92 @@
+"""
+core/config.py
+==============
+Single source of truth for environment variables, tunable constants, and the
+shared external clients (Pinecone, Supabase, Redis).
+
+WHY THIS FILE EXISTS
+--------------------
+In the original code, Pinecone/Supabase/Redis setup, the cache constants, and
+the model names were all scattered through one 600-line file. That makes it
+hard to (a) see what knobs exist and (b) swap a provider later.
+
+Centralizing config means: change a model name, a top_k, or a cache threshold
+in ONE place and the whole pipeline picks it up.
+"""
+
+import os
+import logging
+
+import redis.asyncio as aioredis
+from dotenv import load_dotenv
+from pinecone import Pinecone, ServerlessSpec
+from supabase import create_client, Client
+
+load_dotenv()
+logger = logging.getLogger(__name__)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tunable constants  (the "dials" of the whole RAG system)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# --- Vector index ---
+INDEX_NAME = "rag-hybrid"
+EMBEDDING_DIM = 1536          # text-embedding-3-small / ada-002 dimension
+PINECONE_METRIC = "dotproduct"  # REQUIRED for native sparse+dense hybrid search
+
+# --- Retrieval ---
+RETRIEVER_TOP_K = 10          # how many candidates the retriever pulls
+RERANK_TOP_N = 5              # how many survive the cross-encoder rerank
+
+# --- Models ---
+LLM_MODEL = "gpt-4o-mini"
+RERANKER_MODEL = "BAAI/bge-reranker-base"
+
+# --- Semantic cache ---
+CACHE_PREFIX = "rag:cache:"
+CACHE_INDEX_PREFIX = "rag:cache_idx:"   # one Redis Set per retrieval scope
+CACHE_TTL_SECONDS = 60 * 60 * 24        # 24 hours
+CACHE_SIMILARITY_THRESHOLD = 0.95       # cosine sim required for a cache hit
+
+
+def _require(name: str) -> str:
+    """Fetch an env var or fail loudly at startup (better than failing mid-request)."""
+    value = os.getenv(name)
+    if not value:
+        raise ValueError(f"{name} environment variable not set")
+    return value
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pinecone  (vector database)
+# ─────────────────────────────────────────────────────────────────────────────
+
+pc = Pinecone(api_key=_require("PINECONE_KEY"))
+
+if not pc.has_index(INDEX_NAME):
+    pc.create_index(
+        name=INDEX_NAME,
+        dimension=EMBEDDING_DIM,
+        metric=PINECONE_METRIC,
+        spec=ServerlessSpec(cloud="aws", region="us-east-1"),
+    )
+
+pinecone_index = pc.Index(INDEX_NAME)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Supabase  (relational store: ingestion logs, chats, messages)
+# ─────────────────────────────────────────────────────────────────────────────
+
+supabase: Client = create_client(_require("SUPABASE_URL"), _require("SUPABASE_KEY"))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Redis  (semantic cache)
+# ─────────────────────────────────────────────────────────────────────────────
+
+redis_client: aioredis.Redis = aioredis.from_url(
+    os.getenv("REDIS_URL", "redis://localhost:6379"),
+    decode_responses=True,
+)
