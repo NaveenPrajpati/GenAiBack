@@ -114,7 +114,7 @@ from pinecone_text.sparse import BM25Encoder
 from pydantic import ConfigDict
 
 from app.core.config import (
-    pinecone_index,
+    get_pinecone_index,
     RETRIEVER_TOP_K,
     RERANK_TOP_N,
     RERANKER_MODEL,
@@ -139,12 +139,25 @@ class _FilteredHybridRetriever(PineconeHybridSearchRetriever):
         return super()._get_relevant_documents(query, run_manager=run_manager, **kwargs)
 
 
-# ── Step 3: embedders (built once) ───────────────────────────────────────────
-embeddings = OpenAIEmbeddings()
+# ── Step 3: embedders (lazy — initialized on first request) ──────────────────
+_embeddings: Optional[OpenAIEmbeddings] = None
+_bm25_encoder: Optional[BM25Encoder] = None
 
-# Pre-trained BM25 (MS MARCO). For a specialized corpus, fit on your own texts
-# and persist with bm25_encoder.dump(path) / load with .load(path).
-bm25_encoder = BM25Encoder().default()
+
+def get_embeddings() -> OpenAIEmbeddings:
+    global _embeddings
+    if _embeddings is None:
+        _embeddings = OpenAIEmbeddings()
+    return _embeddings
+
+
+def _get_bm25_encoder() -> BM25Encoder:
+    # BM25Encoder().default() downloads the MS MARCO model — defer to first use.
+    global _bm25_encoder
+    if _bm25_encoder is None:
+        _bm25_encoder = BM25Encoder().default()
+    return _bm25_encoder
+
 
 # ── Step 5: reranker + reorderer (built once; models are expensive to load) ──
 _cross_encoder = None
@@ -166,16 +179,23 @@ def _base_hybrid_retriever(doc_ids: Optional[List[str]]) -> _FilteredHybridRetri
     document ids via Pinecone metadata filtering.
     """
     return _FilteredHybridRetriever(
-        embeddings=embeddings,
-        sparse_encoder=bm25_encoder,
-        index=pinecone_index,
+        embeddings=get_embeddings(),
+        sparse_encoder=_get_bm25_encoder(),
+        index=get_pinecone_index(),
         top_k=RETRIEVER_TOP_K,
         metadata_filter={"doc_id": {"$in": doc_ids}} if doc_ids else None,
     )
 
 
-# Unscoped retriever reused for ingestion writes and "search everything" reads.
-_default_hybrid = _base_hybrid_retriever(doc_ids=None)
+# Unscoped retriever — built lazily on first use.
+_default_hybrid: Optional[_FilteredHybridRetriever] = None
+
+
+def _get_default_hybrid() -> _FilteredHybridRetriever:
+    global _default_hybrid
+    if _default_hybrid is None:
+        _default_hybrid = _base_hybrid_retriever(doc_ids=None)
+    return _default_hybrid
 
 
 def hybrid_add_texts(texts: List[str], metadatas: List[dict]) -> None:
@@ -187,7 +207,7 @@ def hybrid_add_texts(texts: List[str], metadatas: List[dict]) -> None:
     is why ingestion lives next to retrieval — they must use the same encoders,
     or your stored vectors won't match your query vectors.
     """
-    _default_hybrid.add_texts(texts, metadatas=metadatas)
+    _get_default_hybrid().add_texts(texts, metadatas=metadatas)
 
 
 def build_retriever(
@@ -200,10 +220,11 @@ def build_retriever(
     context string (see generation.build_context) — it's a transform on the final
     doc list, not part of the retriever.
 
+
     Args:
         doc_ids: restrict search to these ingestion ids. None = search everything.
     """
-    base = _default_hybrid if not doc_ids else _base_hybrid_retriever(doc_ids)
+    base = _get_default_hybrid() if not doc_ids else _base_hybrid_retriever(doc_ids)
     return ContextualCompressionRetriever(
         base_compressor=_get_reranker(), base_retriever=base
     )

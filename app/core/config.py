@@ -62,17 +62,23 @@ def _require(name: str) -> str:
 # Pinecone  (vector database)
 # ─────────────────────────────────────────────────────────────────────────────
 
-pc = Pinecone(api_key=_require("PINECONE_KEY"))
+_pinecone_index = None
 
-if not pc.has_index(INDEX_NAME):
-    pc.create_index(
-        name=INDEX_NAME,
-        dimension=EMBEDDING_DIM,
-        metric=PINECONE_METRIC,
-        spec=ServerlessSpec(cloud="aws", region="us-east-1"),
-    )
 
-pinecone_index = pc.Index(INDEX_NAME)
+def get_pinecone_index():
+    """Return the Pinecone index, initializing it on first call."""
+    global _pinecone_index
+    if _pinecone_index is None:
+        pc = Pinecone(api_key=_require("PINECONE_KEY"))
+        if not pc.has_index(INDEX_NAME):
+            pc.create_index(
+                name=INDEX_NAME,
+                dimension=EMBEDDING_DIM,
+                metric=PINECONE_METRIC,
+                spec=ServerlessSpec(cloud="aws", region="us-east-1"),
+            )
+        _pinecone_index = pc.Index(INDEX_NAME)
+    return _pinecone_index
 
 
 # ─────────────────────────────────────────────────────────────────────────────

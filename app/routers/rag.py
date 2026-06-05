@@ -30,7 +30,7 @@ from app.core.llm import llm, RAG_PROMPT
 from app.services import storage, cache
 from app.services.ingestion import load_url, build_file_loader, SUPPORTED_FILE_TYPES
 from app.services.ingestion_worker import run_ingestion, INGESTION_JOBS
-from app.services.retrieval import build_retriever, embeddings
+from app.services.retrieval import build_retriever, get_embeddings
 from app.services.generation import build_context, build_sources
 from app.services.evaluation import run_evaluation
 
@@ -147,7 +147,7 @@ async def query_documents_stream(request: QueryRequest):
     async def generate():
         try:
             # Embed once; reused for both the cache check and (on miss) retrieval.
-            query_embedding = await asyncio.to_thread(embeddings.embed_query, request.question)
+            query_embedding = await asyncio.to_thread(get_embeddings().embed_query, request.question)
 
             # ── Semantic cache check ────────────────────────────────────────
             cached = await cache.lookup(query_embedding, scope)
