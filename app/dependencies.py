@@ -1,13 +1,42 @@
 from typing import Annotated
+from fastapi import Depends, HTTPException
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from bson import ObjectId
+import jwt
 
-from fastapi import Header, HTTPException
+from app.database import get_db
+from app.services.user_service import decode_token
+
+_bearer = HTTPBearer()
 
 
-async def get_token_header(x_token: Annotated[str, Header()]):
-    if x_token != "fake-super-secret-token":
-        raise HTTPException(status_code=400, detail="X-Token header invalid")
+async def get_current_user(
+    credentials: Annotated[HTTPAuthorizationCredentials, Depends(_bearer)],
+) -> dict:
+    try:
+        payload = decode_token(credentials.credentials)
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    user_id = payload.get("sub")
+    if not user_id or not ObjectId.is_valid(user_id):
+        raise HTTPException(status_code=401, detail="Invalid token payload")
+
+    user = await get_db()["users"].find_one(
+        {"_id": ObjectId(user_id)}, {"password_hash": 0}
+    )
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    return user
 
 
-async def get_query_token(token: str):
-    if token != "jessica":
-        raise HTTPException(status_code=400, detail="No Jessica token provided")
+async def get_current_real_user(
+    user: Annotated[dict, Depends(get_current_user)],
+) -> dict:
+    if user.get("is_guest"):
+        raise HTTPException(
+            status_code=403, detail="Guest accounts cannot perform this action"
+        )
+    return user

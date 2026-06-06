@@ -1,6 +1,7 @@
 from pydantic import BaseModel, EmailStr, Field, field_validator
 from typing import Optional, Literal, Any
 from bson import ObjectId
+from datetime import datetime
 import re
 
 
@@ -73,11 +74,18 @@ class UserResponse(BaseModel):
     name: str
     email: str
     role: str
-    description: Optional[str]
+    description: Optional[str] = None
+    is_guest: bool = False
+    expires_at: Optional[datetime] = None
 
     model_config = {"populate_by_name": True}
 
 
-class LoginResponse(BaseModel):
+class AuthResponse(BaseModel):
     message: str
+    token: str
     user: UserResponse
+
+
+# kept for backward compatibility
+LoginResponse = AuthResponse
