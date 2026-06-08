@@ -110,10 +110,11 @@ async def classify_intent(state: PlannerState):
                 "system",
                 "Classify the user message into one intent:\n"
                 "- log: recording a specific meal eaten or to be eaten (mentions a dish + day/meal slot)\n"
-                "- plan: generate a full weekly meal plan from scratch\n"
+                "- plan: generate a full weekly meal plan from scratch (no existing plan mentioned)\n"
+                "- update: regenerate or change an existing meal plan (words like update, change, redo, modify, regenerate)\n"
                 "- research: ask for food/nutrition info or suggestions (no specific slot)\n"
                 "- query: view or check what is already in the meal plan\n"
-                "Reply with one word only: log, plan, research, or query.",
+                "Reply with one word only: log, plan, update, research, or query.",
             ),
             ("human", "{text}"),
         ]
@@ -403,9 +404,15 @@ async def research_agent(state: PlannerState):
         messages.extend(tool_results["messages"])
 
     # Final pass: extract structured output from the enriched conversation
-    structured: ResearchOutput = await llm.with_structured_output(ResearchOutput).ainvoke(
+    structured: ResearchOutput = await llm.with_structured_output(
+        ResearchOutput
+    ).ainvoke(
         messages
-        + [HumanMessage(content="Return all meal suggestions with their nutrition data in structured format.")]
+        + [
+            HumanMessage(
+                content="Return all meal suggestions with their nutrition data in structured format."
+            )
+        ]
     )
     logger.info("research data %s", structured)
     return {
@@ -600,9 +607,12 @@ async def plan_agent(state: PlannerState):
         except Exception as e:
             logger.error("approval insert error: %s", e)
 
+    is_update = state.get("intent") == "update" or bool(state.get("plan_id"))
+    action_type = "update_plan" if is_update else "save_plan"
+
     decision = interrupt(
         {
-            "type": "save_plan",
+            "type": action_type,
             "approval_id": approval_id,
             "week_start": week_start,
             "plan": proposed,
@@ -614,25 +624,32 @@ async def plan_agent(state: PlannerState):
             supabase.table("approvals").update(
                 {"status": "rejected", "resolved_at": datetime.now().isoformat()}
             ).eq("id", approval_id).execute()
-        return {"intent": "plan", "plan_status": "rejected"}
+        return {"intent": state.get("intent", "plan"), "plan_status": "rejected"}
 
-    # Approved: create the plan row, then insert all slots.
-    plan_id = None
-    try:
-        plan_row = (
-            supabase.table("meal_plans")
-            .insert(
-                {
-                    "user": state["user_id"],
-                    "week_start": week_start,
-                    "status": "approved",
-                }
+    # Approved: for update reuse the existing plan row; for new plan create one.
+    plan_id = state.get("plan_id") if is_update else None
+    if not plan_id:
+        try:
+            plan_row = (
+                supabase.table("meal_plans")
+                .insert(
+                    {
+                        "user": state["user_id"],
+                        "week_start": week_start,
+                        "status": "approved",
+                    }
+                )
+                .execute()
             )
-            .execute()
-        )
-        plan_id = plan_row.data[0]["id"] if plan_row.data else None
-    except Exception as e:
-        logger.error("meal_plan insert error: %s", e)
+            plan_id = plan_row.data[0]["id"] if plan_row.data else None
+        except Exception as e:
+            logger.error("meal_plan insert error: %s", e)
+    else:
+        # Clear existing slots so we start fresh with the new proposal.
+        try:
+            supabase.table("meal_slots").delete().eq("plan_id", plan_id).execute()
+        except Exception as e:
+            logger.error("meal_slots clear error: %s", e)
 
     existing = (state.get("memory") or {}).get("liked_dishes", [])
     merged = list(
@@ -660,7 +677,7 @@ async def plan_agent(state: PlannerState):
             {"status": "approved", "resolved_at": datetime.now().isoformat()}
         ).eq("id", approval_id).execute()
 
-    return {"intent": "plan", "plan_status": "approved", "plan_id": plan_id}
+    return {"intent": state.get("intent", "plan"), "plan_status": "approved", "plan_id": plan_id}
 
 
 async def load_memory(state: PlannerState):
@@ -683,16 +700,15 @@ async def load_memory(state: PlannerState):
 
 
 def decide_agent(state: PlannerState):
-
-    if state.get("intent") == "log":
+    intent = state.get("intent")
+    if intent == "log":
         return "log_agent"
-    elif state.get("intent") == "query":
+    elif intent == "query":
         return "query_agent"
-    elif state.get("intent") == "research":
+    elif intent == "research":
         return "research_agent"
-    elif state.get("intent") == "plan":
+    elif intent in ("plan", "update"):
         return "plan_agent"
-
     return END
 
 
@@ -736,13 +752,21 @@ async def ask(
 ):
     agent = request.app.state.agent
 
-    # Any client-supplied plan_id must belong to the caller (prevents IDOR
-    # where a user reads/writes meal_slots on someone else's plan).
     if body.plan_id and not await verify_plan_ownership(
         body.plan_id, current_user["uid"]
     ):
         raise HTTPException(
             status_code=403, detail="You do not have access to this plan."
+        )
+
+    # "update" intent requires a plan_id to know which plan to regenerate.
+    # Do a lightweight pre-check so we fail fast with a readable error.
+    text_lower = body.text.lower()
+    update_keywords = ("update", "change", "redo", "modify", "regenerate")
+    if any(kw in text_lower for kw in update_keywords) and not body.plan_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Provide plan_id to update an existing plan.",
         )
 
     thread_id = body.thread_id or str(uuid.uuid4())
@@ -881,6 +905,30 @@ async def delete_disliked(
     return {"status": "done", "result": merged}
 
 
+@mealRouter.get("/meal-slots/{plan_id}")
+async def get_meal_slots(
+    plan_id: str,
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    if not await verify_plan_ownership(plan_id, current_user["uid"]):
+        raise HTTPException(
+            status_code=403, detail="You do not have access to this plan."
+        )
+    try:
+        res = (
+            supabase.table("meal_slots")
+            .select("id, day_of_week, meal_type, recipe_id, recipe_name, protein_g")
+            .eq("plan_id", plan_id)
+            .order("day_of_week")
+            .order("meal_type")
+            .execute()
+        )
+        return {"status": "done", "plan_id": plan_id, "slots": res.data or []}
+    except Exception as e:
+        logger.error("get_meal_slots error: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to fetch meal slots.")
+
+
 @mealRouter.get("/grocery-list/{plan_id}")
 async def grocery_list(
     plan_id: str,
@@ -977,7 +1025,15 @@ async def run_triggers(agent):
     now = datetime.now()
     week_start = get_monday()
     try:
-        triggers = supabase.table("triggers").select("*").eq("enabled", True).execute()
+        # Only meal-plan schedules — other features (e.g. personal_assistant)
+        # share this table with their own action_type.
+        triggers = (
+            supabase.table("triggers")
+            .select("*")
+            .eq("enabled", True)
+            .eq("action_type", "schedule")
+            .execute()
+        )
     except Exception as e:
         logger.error("run_triggers fetch error: %s", e)
         return
@@ -1021,7 +1077,9 @@ async def run_triggers(agent):
                         "status": "pending",
                     }
                 ).execute()
-                logger.info(f"[trigger] Approval created for existing plan, user={t['user_id']}")
+                logger.info(
+                    f"[trigger] Approval created for existing plan, user={t['user_id']}"
+                )
             else:
                 # No existing plan: invoke agent to generate one
                 config = {"configurable": {"thread_id": thread_id}}
@@ -1034,7 +1092,9 @@ async def run_triggers(agent):
                     config=config,
                 )
                 if "__interrupt__" in agent_result:
-                    logger.info(f"[trigger] New plan approval created, user={t['user_id']}")
+                    logger.info(
+                        f"[trigger] New plan approval created, user={t['user_id']}"
+                    )
 
             supabase.table("triggers").update({"last_run_at": now.isoformat()}).eq(
                 "id", t["id"]

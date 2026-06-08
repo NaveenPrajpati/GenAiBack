@@ -10,11 +10,13 @@ from app.routers import (
     users,
     webscraping,
     meal_planner,
+    personal_assistant,
 )
 from app.database import connect_db, close_db
 from app.routers import rag
 from app.routers import chat
 from app.routers.meal_planner import graph, run_triggers
+from app.routers.personal_assistant import graph as pa_graph, run_pa_triggers
 from app.services.user_service import cleanup_expired_guests
 from app.database import get_db
 from langgraph.checkpoint.postgres import PostgresSaver
@@ -59,19 +61,28 @@ async def lifespan(app: FastAPI):
         await checkpointer.setup()
 
         app.state.agent = graph.compile(checkpointer=checkpointer)
+        app.state.pa_agent = pa_graph.compile(checkpointer=checkpointer)
         print("Using PostgresSaver checkpointer")
 
     except Exception as e:
         print(f"PostgresSaver failed, falling back to MemorySaver: {e}")
         if checkpointer_context:
             await checkpointer_context.__aexit__(None, None, None)
+            checkpointer_context = None
 
         app.state.agent = graph.compile(checkpointer=MemorySaver())
+        app.state.pa_agent = pa_graph.compile(checkpointer=MemorySaver())
 
     scheduler.add_job(
         run_triggers,
         CronTrigger(hour=18, minute=30, day_of_week="sun"),
         args=[app.state.agent],
+    )
+    # Personal-assistant daily task digest at 08:00.
+    scheduler.add_job(
+        run_pa_triggers,
+        CronTrigger(hour=8, minute=0),
+        args=[app.state.pa_agent],
     )
     # Failsafe: sweep any guests the TTL index missed (e.g. during downtime)
     scheduler.add_job(cleanup_expired_guests, "interval", hours=1)
@@ -108,6 +119,7 @@ app.include_router(prefix="/api/user", router=users.router)
 app.include_router(prefix="/api", router=rag.router)
 app.include_router(prefix="/api", router=chat.router)
 app.include_router(prefix="/api", router=meal_planner.mealRouter)
+app.include_router(prefix="/api", router=personal_assistant.paRouter)
 app.include_router(prefix="/api", router=webscraping.router)
 app.include_router(prefix="/api", router=emailassistant.router)
 app.include_router(prefix="/api", router=recipegenerator.router)

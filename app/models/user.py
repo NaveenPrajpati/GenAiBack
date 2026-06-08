@@ -21,6 +21,7 @@ class PyObjectId(str):
     @classmethod
     def __get_pydantic_core_schema__(cls, source, handler):
         from pydantic_core import core_schema
+
         return core_schema.no_info_plain_validator_function(
             cls.validate,
             serialization=core_schema.to_string_ser_schema(),
@@ -28,8 +29,6 @@ class PyObjectId(str):
 
 
 class UserCreate(BaseModel):
-    first_name: str = Field(..., min_length=2, max_length=50)
-    last_name: str = Field(..., min_length=2, max_length=50)
     name: str = Field(..., min_length=2, max_length=100)
     email: EmailStr
     role: Literal["admin", "user"] = "user"
@@ -49,11 +48,12 @@ class UserCreate(BaseModel):
             raise ValueError("Password must contain at least one special character")
         return v
 
-    @field_validator("first_name", "last_name")
     @classmethod
     def name_alpha(cls, v: str) -> str:
         if not re.match(r"^[A-Za-z\s\-']+$", v):
-            raise ValueError("Name must contain only letters, spaces, hyphens, or apostrophes")
+            raise ValueError(
+                "Name must contain only letters, spaces, hyphens, or apostrophes"
+            )
         return v.strip()
 
     @field_validator("name")
@@ -69,14 +69,14 @@ class UserLogin(BaseModel):
 
 class UserResponse(BaseModel):
     id: PyObjectId = Field(alias="_id")
-    first_name: str
-    last_name: str
     name: str
     email: str
     role: str
     description: Optional[str] = None
     is_guest: bool = False
     expires_at: Optional[datetime] = None
+    diet: str = "vegetarian"
+    protein_target: int = 100
 
     model_config = {"populate_by_name": True}
 

@@ -21,6 +21,7 @@ router = APIRouter(
 
 # ── Tool ──
 
+
 @tool
 def scrape_webpage(url: str) -> str:
     """Scrape a webpage and extract its main text content from the given URL."""
@@ -47,7 +48,11 @@ def scrape_webpage(url: str) -> str:
         if len(text) > 8000:
             text = text[:8000] + "\n\n[Content truncated...]"
 
-        return text if text.strip() else "Could not extract meaningful text from this page."
+        return (
+            text
+            if text.strip()
+            else "Could not extract meaningful text from this page."
+        )
 
     except requests.RequestException as e:
         return f"Error fetching URL: {str(e)}"
@@ -73,23 +78,24 @@ agent = create_agent(
 
 # ── Request schema ──
 
+
 class QueryRequest(BaseModel):
     text: str
 
 
 # ── Non-streaming endpoint ──
 
+
 @router.post("/scrap")
 async def scrap(request: QueryRequest):
-    result = agent.invoke(
-        {"messages": [{"role": "user", "content": request.text}]}
-    )
+    result = agent.invoke({"messages": [{"role": "user", "content": request.text}]})
     # Extract the final AI message content
     ai_message = result["messages"][-1].content
     return {"summary": ai_message}
 
 
 # ── Streaming endpoint (token-by-token for typing effect) ──
+
 
 @router.post("/scrap/stream")
 async def scrap_stream(request: QueryRequest):

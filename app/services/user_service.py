@@ -67,16 +67,14 @@ async def signup_user(user: UserCreate) -> tuple[dict, str]:
         raise ValueError("Email already registered")
     record = {
         "uid": str(uuid.uuid4()),
-        "first_name": user.first_name,
-        "last_name": user.last_name,
         "name": user.name,
         "email": user.email,
         "role": user.role,
         "description": user.description,
         "password_hash": _hash_password(user.password),
         "is_guest": False,
-        "diet": "vegetarien",
-        "protien_target": 100,
+        "diet": "vegetarian",
+        "protein_target": 100,
     }
     result = await col.insert_one(record)
     created = await col.find_one({"_id": result.inserted_id}, {"password_hash": 0})
@@ -105,13 +103,13 @@ async def create_guest_user() -> tuple[dict, str]:
     expires_at = datetime.now(timezone.utc) + timedelta(hours=GUEST_TTL_HOURS)
     record = {
         "uid": str(uuid.uuid4()),
-        "first_name": "Guest",
-        "last_name": "User",
         "name": f"Guest_{short_id}",
         "email": f"guest_{short_id}@guest.local",
         "role": "user",
         "description": None,
         "is_guest": True,
+        "diet": "vegetarian",
+        "protein_target": 100,
         "expires_at": expires_at,
     }
     result = await col.insert_one(record)
@@ -133,8 +131,6 @@ async def convert_guest_to_real(user_id: str, user: UserCreate) -> tuple[dict, s
         {"_id": ObjectId(user_id)},
         {
             "$set": {
-                "first_name": user.first_name,
-                "last_name": user.last_name,
                 "name": user.name,
                 "email": user.email,
                 "role": user.role,

@@ -17,16 +17,21 @@ import app.routers.meal_planner as meal_planner
 from app.dependencies import get_current_user
 
 
-# --------------------------------------------------------------------------- #
-# helpers
-# --------------------------------------------------------------------------- #
 def _chainable(execute_data):
     """A Supabase-client stand-in whose query builder returns itself for every
     chained call and yields `execute_data` from .execute()."""
     q = MagicMock()
     for meth in (
-        "select", "eq", "in_", "ilike", "order", "limit",
-        "maybe_single", "insert", "update", "upsert",
+        "select",
+        "eq",
+        "in_",
+        "ilike",
+        "order",
+        "limit",
+        "maybe_single",
+        "insert",
+        "update",
+        "upsert",
     ):
         getattr(q, meth).return_value = q
     q.execute.return_value = SimpleNamespace(data=execute_data)
@@ -40,8 +45,16 @@ def _supabase_seq(*results):
     in order — for code paths that issue several queries."""
     q = MagicMock()
     for meth in (
-        "select", "eq", "in_", "ilike", "order", "limit",
-        "maybe_single", "insert", "update", "upsert",
+        "select",
+        "eq",
+        "in_",
+        "ilike",
+        "order",
+        "limit",
+        "maybe_single",
+        "insert",
+        "update",
+        "upsert",
     ):
         getattr(q, meth).return_value = q
     q.execute.side_effect = [SimpleNamespace(data=d) for d in results]
@@ -62,9 +75,7 @@ def _make_client(agent, user=None):
 # intent classifier + routing
 # --------------------------------------------------------------------------- #
 async def test_classify_intent_returns_llm_intent(monkeypatch):
-    fake_chain = RunnableLambda(
-        lambda _: meal_planner.IntentOutput(intent="plan")
-    )
+    fake_chain = RunnableLambda(lambda _: meal_planner.IntentOutput(intent="plan"))
     mock_llm = MagicMock()
     mock_llm.with_structured_output.return_value = fake_chain
     monkeypatch.setattr(meal_planner, "llm", mock_llm)
@@ -72,9 +83,7 @@ async def test_classify_intent_returns_llm_intent(monkeypatch):
     out = await meal_planner.classify_intent({"query": "plan my whole week"})
 
     assert out == {"intent": "plan"}
-    mock_llm.with_structured_output.assert_called_once_with(
-        meal_planner.IntentOutput
-    )
+    mock_llm.with_structured_output.assert_called_once_with(meal_planner.IntentOutput)
 
 
 def test_decide_agent_routes_each_intent():
@@ -97,12 +106,8 @@ def test_approve_happy_path_resumes_agent(monkeypatch):
         meal_planner, "supabase", _chainable({"id": "a1", "user_id": "u1"})
     )
     agent = MagicMock()
-    agent.aget_state = AsyncMock(
-        return_value=SimpleNamespace(next=("plan_agent",))
-    )
-    agent.ainvoke = AsyncMock(
-        return_value={"plan_status": "approved", "plan_id": "p1"}
-    )
+    agent.aget_state = AsyncMock(return_value=SimpleNamespace(next=("plan_agent",)))
+    agent.ainvoke = AsyncMock(return_value={"plan_status": "approved", "plan_id": "p1"})
     client = _make_client(agent)
 
     resp = client.post(
@@ -312,9 +317,7 @@ def test_disliked_endpoints(monkeypatch):
     added = client.post("/meal-planner/disliked", json={"dish": "tofu"})
     assert added.json()["result"] == ["okra", "tofu"]
 
-    removed = client.request(
-        "DELETE", "/meal-planner/disliked", json={"dish": "okra"}
-    )
+    removed = client.request("DELETE", "/meal-planner/disliked", json={"dish": "okra"})
     assert removed.json()["result"] == []
 
 
@@ -337,9 +340,7 @@ async def test_build_grocery_list_aggregates_by_slot(monkeypatch):
             ],
         }
     ]
-    monkeypatch.setattr(
-        meal_planner, "supabase", _supabase_seq(slots, by_id, [])
-    )
+    monkeypatch.setattr(meal_planner, "supabase", _supabase_seq(slots, by_id, []))
 
     items = await meal_planner.build_grocery_list("p1")
     by_name = {i["name"]: i for i in items}
@@ -364,9 +365,7 @@ async def test_build_grocery_list_resolves_by_name_when_no_recipe_id(monkeypatch
 
     items = await meal_planner.build_grocery_list("p1")
 
-    assert items == [
-        {"name": "Lettuce", "qty": 1, "unit": "head", "checked": False}
-    ]
+    assert items == [{"name": "Lettuce", "qty": 1, "unit": "head", "checked": False}]
 
 
 def test_grocery_list_endpoint_checks_ownership(monkeypatch):
