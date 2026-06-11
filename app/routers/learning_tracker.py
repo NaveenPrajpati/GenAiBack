@@ -32,49 +32,55 @@ mealRouter = APIRouter(
 
 class QueryRequest(BaseModel):
     text: str
-    roadmap_id: Optional[str] = None
+    roadmapId: Optional[str] = None
     thread_id: Optional[str] = None
 
 
-class LearningState(TypedDict, total=False):
-    query: str
-    intent: str
-    current_user: dict
-    user_id: str
-    thread_id: str
-    memory: dict
-    plan_status: Optional[str]
-    log_status: Optional[str]
-    conflict: Optional[dict]
-    roadmap_id: Optional[str]
-    suggestions: Optional[list]
-    meal_slots: Optional[list]
-    roadmap: Optional[dict]
-    roadmap_status: Optional[str]
-
-
-graph = StateGraph(LearningState)
-
-
 class TopicNode(BaseModel):
+    id: str
     order: int
     title: str
     description: str
     prerequisites: List[str]
     estimated_hours: Optional[int] = None
     resources: Optional[List[str]] = None
+    covered: Optional[bool] = False
 
 
 class RoadmapOutput(BaseModel):
-    topic: str
-    goal: str
+    id: str
+    title: str
+    summary: str
+    status: Literal["active", "archived", "completed"] = "archived"
+    userid: str
     total_estimated_hours: Optional[int] = None
     stages: List[str]
     topics: List[TopicNode]
 
 
+class LearningState(TypedDict, total=False):
+    query: str
+    intent: str
+    current_user: dict
+    userId: str
+    thread_id: str
+    memory: dict
+    plan_status: Optional[str]
+    log_status: Optional[str]
+    conflict: Optional[dict]
+    roadmapId: Optional[str]
+    suggestions: Optional[list]
+    meal_slots: Optional[list]
+    roadmap: Optional[RoadmapOutput]
+    roadmap_status: Optional[str]
+    next_topic: str
+
+
+graph = StateGraph(LearningState)
+
+
 class GroceryItem(BaseModel):
-    roadmap_id: Optional[str] = None
+    roadmapId: Optional[str] = None
     name: str
     qty: Optional[float] = None
     unit: Optional[str] = None
@@ -121,15 +127,15 @@ async def classify_intent(state: LearningState):
             (
                 "system",
                 "Classify the user message into one intent:\n"
-                "- whats_next: user asks what to study or do next in their learning roadmap\n"
+                "- create_roadmap: user asks what to study \n"
                 "- explain: user asks for an explanation of a concept, topic, or step\n"
                 "- quiz: user requests a quiz or test on a topic\n"
                 "- submit_quiz: user is submitting answers to a quiz for evaluation\n"
                 "- find_resources: user asks for resources, links, books, or materials on a topic\n"
                 "- update_progress: user marks progress, completes a step, or logs learning activity\n"
-                "- query_roadmap: user wants to view or check the current state of their roadmap\n"
+                "- query_roadmap: user asks what to do next in their learning roadmap or user wants to view or check the current state of their roadmap\n"
                 "- modify_roadmap: user wants to change, restructure, or regenerate their roadmap\n"
-                "Reply with one word only: whats_next, explain, quiz, submit_quiz, find_resources, update_progress, query_roadmap, or modify_roadmap.",
+                "Reply with one word only: create_roadmap, explain, quiz, submit_quiz, find_resources, update_progress, query_roadmap, or modify_roadmap.",
             ),
             ("human", "{text}"),
         ]
@@ -142,13 +148,24 @@ async def classify_intent(state: LearningState):
     }
 
 
-class QueryOutput(BaseModel):
-    meal_type: List[str]
-    time: str
+class ProgressOutput(BaseModel):
+    nextTopic: str
+    covedTopic: list[str]
+    remainingTopics: list[list]
+    topicsToUpdate: list[str]
+
+
+class TutorOutput(BaseModel):
+    topic: str
+
+
+class UpdateProgressOutput(BaseModel):
+    topic: str
+    covered: Optional[bool] = False
 
 
 async def findRecipeInDb(
-    recipe: Optional[str] = None, filters: Optional[QueryOutput] = None
+    recipe: Optional[str] = None, filters: Optional[TutorOutput] = None
 ):
     try:
         res = (
@@ -183,19 +200,19 @@ async def insertRecipeInMealSlot(data: dict):
     try:
         # Upsert (not insert) so re-logging the same plan/day/meal_type replaces
         # the slot instead of creating a duplicate row. Requires a unique
-        # constraint on (roadmap_id, day_of_week, meal_type) — see migrations/.
+        # constraint on (roadmapId, day_of_week, meal_type) — see migrations/.
         res = (
             supabase.table("meal_slots")
             .upsert(
                 {
-                    "roadmap_id": data["roadmap_id"],
+                    "roadmapId": data["roadmapId"],
                     "day_of_week": data["day_of_week"],
                     "meal_type": data["meal_type"],
                     "recipe_id": data["recipe_id"],
                     "recipe_name": data["recipe_name"],
                     "protein_g": data["protein_g"],
                 },
-                on_conflict="roadmap_id,day_of_week,meal_type",
+                on_conflict="roadmapId,day_of_week,meal_type",
             )
             .execute()
         )
@@ -207,7 +224,7 @@ async def insertRecipeInMealSlot(data: dict):
 
 
 async def log_recipe_to_slot(
-    roadmap_id: str, recipe_name: str, day_of_week: int, meal_type: str
+    roadmapId: str, recipe_name: str, day_of_week: int, meal_type: str
 ):
     """Find-or-create a recipe by name, then attach it to a meal slot.
 
@@ -231,7 +248,7 @@ async def log_recipe_to_slot(
 
     return await insertRecipeInMealSlot(
         {
-            "roadmap_id": roadmap_id,
+            "roadmapId": roadmapId,
             "day_of_week": day_of_week,
             "meal_type": meal_type.lower(),
             "recipe_id": recipe_id,
@@ -242,12 +259,12 @@ async def log_recipe_to_slot(
 
 
 async def insertRoadmapToDb(
-    roadmap: RoadmapOutput, user_id: Optional[str] = None
+    roadmap: RoadmapOutput, userId: Optional[str] = None
 ) -> Optional[str]:
     try:
         doc = roadmap.model_dump()
-        doc["user_id"] = user_id
-        doc["created_at"] = datetime.now(timezone.utc).isoformat()
+        doc["userId"] = userId
+        doc["createdAt"] = datetime.now(timezone.utc).isoformat()
         res = await get_db()["roadmaps"].insert_one(doc)
         logger.info("insertRoadmapToDb inserted: %s", res.inserted_id)
         return str(res.inserted_id)
@@ -257,147 +274,255 @@ async def insertRoadmapToDb(
 
 
 async def roadmap_agent(state: LearningState):
-    is_modify = state.get("intent") == "modify_roadmap"
+    from bson import ObjectId
 
-    if is_modify:
-        # Fetch the existing roadmap so the LLM can operate on it
+    is_modify = state.get("intent") == "modify_roadmap"
+    existingApproval = await get_db()["approvals"].find_one(
+        {"threadId": state.get("thread_id"), "status": "pending"}
+    )
+    if existingApproval:
+        approval_id = str(existingApproval["_id"])
+        action_type = existingApproval.get(
+            "action", "update_roadmap" if is_modify else "save_roadmap"
+        )
+        result = RoadmapOutput(**existingApproval["payload"])
+        logger.info("roadmap approval already exists: %s", approval_id)
+    else:
+        if is_modify:
+            # Fetch the existing roadmap so the LLM can operate on it
+            existing_roadmap = None
+            roadmapId = state.get("roadmapId")
+            if roadmapId:
+                try:
+                    from bson import ObjectId
+
+                    doc = await get_db()["roadmaps"].find_one(
+                        {"_id": ObjectId(roadmapId)}
+                    )
+                    if doc:
+                        doc.pop("_id", None)
+                        existing_roadmap = doc
+                except Exception as e:
+                    logger.error("roadmap fetch error: %s", e)
+
+            prompt = ChatPromptTemplate.from_messages(
+                [
+                    (
+                        "system",
+                        "You are an expert curriculum designer. The user wants to modify an existing learning roadmap.\n"
+                        "Apply the requested change (add topic, remove topic, reorder, adjust hours, update resources, etc.).\n"
+                        "Return the full updated roadmap — keep all unchanged topics intact.\n"
+                        "Maintain correct order values and prerequisite links after any structural change.\n"
+                        "Existing roadmap:\n{existing_roadmap}",
+                    ),
+                    ("human", "{text}"),
+                ]
+            )
+            chain = prompt | llm.with_structured_output(RoadmapOutput)
+            result: RoadmapOutput = await chain.ainvoke(
+                {"text": state["query"], "existing_roadmap": existing_roadmap or "none"}
+            )
+        else:
+            prompt = ChatPromptTemplate.from_messages(
+                [
+                    (
+                        "system",
+                        "You are an expert curriculum designer and learning path architect.\n"
+                        "Given a topic the user wants to learn, produce a complete, sequenced roadmap:\n"
+                        "1. Break the subject into ordered topics (order field starts at 1).\n"
+                        "2. For each topic list its prerequisites by title — only topics that appear earlier in the list.\n"
+                        "3. Group topics into broad stages (e.g. Foundations, Intermediate, Advanced).\n"
+                        "4. Estimate realistic study hours per topic and a total.\n"
+                        "5. Suggest 1-2 free learning resources (course names, docs, book titles) per topic.\n"
+                        "Personalize based on the exact subject in the user query. Be specific and practical.",
+                    ),
+                    ("human", "{text}"),
+                ]
+            )
+            chain = prompt | llm.with_structured_output(RoadmapOutput)
+            result: RoadmapOutput = await chain.ainvoke({"text": state["query"]})
+        logger.info("roadmap_agent result: %s", result)
+
+        action_type = "update_roadmap" if is_modify else "save_roadmap"
+
+        approval_id = None
+        try:
+
+            res = await get_db()["approvals"].insert_one(
+                {
+                    "userId": state.get("userId"),
+                    "threadId": state.get("thread_id"),
+                    "action": action_type,
+                    "payload": result.model_dump(),
+                    "status": "pending",
+                    "createdAt": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            approval_id = str(res.inserted_id)
+            logger.info("roadmap pending approval created: %s", approval_id)
+        except Exception as e:
+            logger.error("roadmap approval insert error: %s", e)
+
+    # Pause — send roadmap + approval_id to client for review
+    decision = interrupt(
+        {"type": action_type, "approvalId": approval_id, "roadmap": result.model_dump()}
+    )
+
+    if decision != "approved":
+        if approval_id:
+            try:
+                await get_db()["approvals"].update_one(
+                    {"_id": ObjectId(approval_id)},
+                    {
+                        "$set": {
+                            "status": "rejected",
+                            "resolvedAt": datetime.now(timezone.utc).isoformat(),
+                        }
+                    },
+                )
+            except Exception as e:
+                logger.error("approval reject update error: %s", e)
+        return {"intent": state.get("intent"), "roadmap_status": "rejected"}
+
+    # Approved — update approval status then persist roadmap
+    if approval_id:
+        try:
+            await get_db()["approvals"].update_one(
+                {"_id": ObjectId(approval_id)},
+                {
+                    "$set": {
+                        "status": "approved",
+                        "resolvedAt": datetime.now(timezone.utc).isoformat(),
+                    }
+                },
+            )
+        except Exception as e:
+            logger.error("approval approve update error: %s", e)
+
+    if is_modify and state.get("roadmapId"):
+        try:
+            await get_db()["roadmaps"].replace_one(
+                {"_id": ObjectId(state["roadmapId"])},
+                {
+                    **result.model_dump(),
+                    "userId": state.get("userId"),
+                    "updatedAt": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+            saved_roadmapId = state["roadmapId"]
+        except Exception as e:
+            logger.error("roadmap update error: %s", e)
+            saved_roadmapId = None
+    else:
+        saved_roadmapId = await insertRoadmapToDb(result, state.get("userId"))
+
+    return {
+        "intent": state.get("intent"),
+        "roadmap_status": "approved",
+        "roadmapId": saved_roadmapId,
+        "roadmap": result.model_dump(),
+    }
+
+
+async def tutor_agent(state: LearningState):
+
+    if state.get("intent") == "whats_next":
         existing_roadmap = None
-        roadmap_id = state.get("roadmap_id")
-        if roadmap_id:
+        roadmapId = state.get("roadmapId")
+        if roadmapId:
             try:
                 from bson import ObjectId
-                doc = await get_db()["roadmaps"].find_one({"_id": ObjectId(roadmap_id)})
+
+                doc = await get_db()["roadmaps"].find_one({"_id": ObjectId(roadmapId)})
                 if doc:
                     doc.pop("_id", None)
                     existing_roadmap = doc
             except Exception as e:
                 logger.error("roadmap fetch error: %s", e)
+            findPrompt = ChatPromptTemplate.from_messages(
+                [
+                    (
+                        "system",
+                        "You are an expert curriculum designer. The user wants to know that what should he or she learn next so check existing roadmap what user coverd till now suggest him what should he learn next according to roadmap.\n",
+                        "Existing roadmap:\n{existing_roadmap}",
+                    ),
+                    ("human", "{text}"),
+                ]
+            )
 
-        prompt = ChatPromptTemplate.from_messages(
+        chain = findPrompt | llm.with_structured_output(TutorOutput)
+        result: TutorOutput = await chain.ainvoke({"text": state["query"]})
+        logger.info("query data %s", result)
+
+        return {
+            "next_topic": result.topic,
+        }
+
+
+async def udateTopic(topic: TopicNode, userId: Optional[str] = None) -> Optional[str]:
+    try:
+        doc = topic.model_dump()
+        doc["id"] = topic.id
+        res = await get_db()["roadmaps"].update_one(doc)
+        logger.info("insertRoadmapToDb inserted: %s", res.inserted_id)
+        return str(res.inserted_id)
+    except Exception as e:
+        logger.error("insertRoadmapToDb error: %s", e)
+        return None
+
+
+async def progress_agent(state: LearningState):
+    if state.get("intent") == "query_roadmap":
+        existing_roadmap = None
+        roadmapId = state.get("roadmapId")
+        if roadmapId:
+            try:
+                from bson import ObjectId
+
+                doc = await get_db()["roadmaps"].find_one({"_id": ObjectId(roadmapId)})
+                if doc:
+                    doc.pop("_id", None)
+                    existing_roadmap = doc
+            except Exception as e:
+                logger.error("roadmap fetch error: %s", e)
+            findPrompt = ChatPromptTemplate.from_messages(
+                [
+                    (
+                        "system",
+                        "You are an expert curriculum designer. The user wants to know that what should he or she learn next so check existing roadmap what user coverd till now suggest him what should he learn next according to roadmap.\n",
+                        "Existing roadmap:\n{existing_roadmap}",
+                    ),
+                    ("human", "{text}"),
+                ]
+            )
+
+        chain = findPrompt | llm.with_structured_output(ProgressOutput)
+        result: ProgressOutput = await chain.ainvoke({"text": state["query"]})
+        logger.info("query data %s", result)
+
+        return {
+            "next_topic": result.topic,
+        }
+    elif state.get("intent") == "update_progress":
+        findPrompt = ChatPromptTemplate.from_messages(
             [
                 (
                     "system",
-                    "You are an expert curriculum designer. The user wants to modify an existing learning roadmap.\n"
-                    "Apply the requested change (add topic, remove topic, reorder, adjust hours, update resources, etc.).\n"
-                    "Return the full updated roadmap — keep all unchanged topics intact.\n"
-                    "Maintain correct order values and prerequisite links after any structural change.\n"
+                    "You are an expert curriculum designer. you have my this roadmap find or extract of topic for user is talking about and what does user want to update does is coverd it means covered:True of  \n",
                     "Existing roadmap:\n{existing_roadmap}",
                 ),
                 ("human", "{text}"),
             ]
         )
-        chain = prompt | llm.with_structured_output(RoadmapOutput)
-        result: RoadmapOutput = await chain.ainvoke(
-            {"text": state["query"], "existing_roadmap": existing_roadmap or "none"}
-        )
-    else:
-        prompt = ChatPromptTemplate.from_messages(
-            [
-                (
-                    "system",
-                    "You are an expert curriculum designer and learning path architect.\n"
-                    "Given a topic the user wants to learn, produce a complete, sequenced roadmap:\n"
-                    "1. Break the subject into ordered topics (order field starts at 1).\n"
-                    "2. For each topic list its prerequisites by title — only topics that appear earlier in the list.\n"
-                    "3. Group topics into broad stages (e.g. Foundations, Intermediate, Advanced).\n"
-                    "4. Estimate realistic study hours per topic and a total.\n"
-                    "5. Suggest 1-2 free learning resources (course names, docs, book titles) per topic.\n"
-                    "Personalize based on the exact subject in the user query. Be specific and practical.",
-                ),
-                ("human", "{text}"),
-            ]
-        )
-        chain = prompt | llm.with_structured_output(RoadmapOutput)
-        result: RoadmapOutput = await chain.ainvoke({"text": state["query"]})
-    logger.info("roadmap_agent result: %s", result)
 
-    action_type = "update_roadmap" if is_modify else "save_roadmap"
+        chain = findPrompt | llm.with_structured_output(ProgressOutput)
+        result: ProgressOutput = await chain.ainvoke({"text": state["query"]})
 
-    # Pause here — send the generated/updated roadmap to the user for review
-    decision = interrupt({"type": action_type, "roadmap": result.model_dump()})
-
-    if decision != "approved":
-        return {"intent": state.get("intent"), "roadmap_status": "rejected"}
-
-    # User approved — record approval then persist
-    approval_id = None
-    try:
-        res = await get_db()["approvals"].insert_one(
-            {
-                "user_id": state.get("user_id"),
-                "thread_id": state.get("thread_id"),
-                "action_type": action_type,
-                "payload": result.model_dump(),
-                "status": "approved",
-                "created_at": datetime.now(timezone.utc).isoformat(),
-            }
-        )
-        approval_id = str(res.inserted_id)
-        logger.info("roadmap approval saved: %s", approval_id)
-    except Exception as e:
-        logger.error("roadmap approval insert error: %s", e)
-
-    if is_modify and state.get("roadmap_id"):
-        # Replace the existing roadmap document in-place
-        try:
-            from bson import ObjectId
-            await get_db()["roadmaps"].replace_one(
-                {"_id": ObjectId(state["roadmap_id"])},
-                {**result.model_dump(), "user_id": state.get("user_id"), "updated_at": datetime.now(timezone.utc).isoformat()},
-            )
-            saved_roadmap_id = state["roadmap_id"]
-        except Exception as e:
-            logger.error("roadmap update error: %s", e)
-            saved_roadmap_id = None
-    else:
-        saved_roadmap_id = await insertRoadmapToDb(result, state.get("user_id"))
-
-    return {
-        "intent": state.get("intent"),
-        "roadmap_status": "approved",
-        "roadmap_id": saved_roadmap_id,
-        "roadmap": result.model_dump(),
-    }
-
-
-async def findMealSlotsInDb(roadmap_id: str, meal_types: List[str]):
-    try:
-        res = (
-            supabase.table("meal_slots")
-            .select("day_of_week, meal_type, recipe_name, protein_g")
-            .eq("roadmap_id", roadmap_id)
-            .in_("meal_type", meal_types)
-            .execute()
-        )
-        logger.info("findMealSlotsInDb result: %s", res)
-        return res.data if res else None
-    except Exception as e:
-        logger.error("findMealSlotsInDb error: %s", e)
-        return None
-
-
-async def query_agent(state: LearningState):
-    findPrompt = ChatPromptTemplate.from_messages(
-        [
-            (
-                "system",
-                "You are an expert at extracting information about having food , so tell me what types of meal (dinner,lunch,breakfast ) user want to know and for when (today,week)",
-            ),
-            ("human", "{text}"),
-        ]
-    )
-
-    chain = findPrompt | llm.with_structured_output(QueryOutput)
-    result: QueryOutput = await chain.ainvoke({"text": state["query"]})
-    logger.info("query data %s", result)
-    roadmap_id = state.get("roadmap_id")
-    if not roadmap_id:
-        return {"intent": "query", "meal_slots": []}
-    slots = await findMealSlotsInDb(roadmap_id, result.meal_type)
-    return {
-        "intent": "query",
-        "meal_slots": slots or [],
-    }
+        udateTopic()
+        logger.info("query data %s", result)
+        return {
+            "roadmap": result.topic,
+        }
 
 
 class NutritionData(BaseModel):
@@ -502,7 +627,7 @@ async def research_agent(state: LearningState):
 
 
 class MealSlots(BaseModel):
-    roadmap_id: Optional[str] = None
+    roadmapId: Optional[str] = None
     day_of_week: int = 0
     meal_type: Literal["dinner", "lunch", "breakfast"]
     recipe_id: Optional[str] = None
@@ -514,23 +639,23 @@ class PlanOutput(BaseModel):
     plan: list[MealSlots] = []
 
 
-async def remember(user_id: str, key: str, value):
+async def remember(userId: str, key: str, value):
     try:
         supabase.table("memory").upsert(
-            {"user_id": user_id, "key": key, "value": value},
-            on_conflict="user_id,key",
+            {"userId": userId, "key": key, "value": value},
+            on_conflict="userId,key",
         ).execute()
     except Exception as e:
         logger.error("remember error: %s", e)
 
 
-async def get_disliked_dishes(user_id: str) -> list:
+async def get_disliked_dishes(userId: str) -> list:
     """Return the user's current disliked_dishes list (empty on miss/error)."""
     try:
         row = (
             supabase.table("memory")
             .select("value")
-            .eq("user_id", user_id)
+            .eq("userId", userId)
             .eq("key", "disliked_dishes")
             .maybe_single()
             .execute()
@@ -541,23 +666,23 @@ async def get_disliked_dishes(user_id: str) -> list:
         return []
 
 
-async def add_disliked_dish(user_id: str, dish: str) -> list:
+async def add_disliked_dish(userId: str, dish: str) -> list:
     """Append a dish to the user's disliked_dishes memory (de-duplicated)."""
-    existing = await get_disliked_dishes(user_id)
+    existing = await get_disliked_dishes(userId)
     merged = list(dict.fromkeys(existing + [dish]))
-    await remember(user_id, "disliked_dishes", merged)
+    await remember(userId, "disliked_dishes", merged)
     return merged
 
 
-async def remove_disliked_dish(user_id: str, dish: str) -> list:
+async def remove_disliked_dish(userId: str, dish: str) -> list:
     """Remove a dish from the user's disliked_dishes memory."""
-    existing = await get_disliked_dishes(user_id)
+    existing = await get_disliked_dishes(userId)
     merged = [d for d in existing if d != dish]
-    await remember(user_id, "disliked_dishes", merged)
+    await remember(userId, "disliked_dishes", merged)
     return merged
 
 
-async def build_grocery_list(roadmap_id: str) -> list:
+async def build_grocery_list(roadmapId: str) -> list:
     """Aggregate ingredients across every meal slot in a plan into a shopping
     list. Quantities accumulate per (ingredient name, unit), counting each slot
     separately so a dish eaten N times contributes N times."""
@@ -565,7 +690,7 @@ async def build_grocery_list(roadmap_id: str) -> list:
         slots_res = (
             supabase.table("meal_slots")
             .select("recipe_id, recipe_name")
-            .eq("roadmap_id", roadmap_id)
+            .eq("roadmapId", roadmapId)
             .execute()
         )
         slots = slots_res.data or []
@@ -674,7 +799,7 @@ async def plan_agent(state: LearningState):
                 supabase.table("approvals")
                 .insert(
                     {
-                        "user_id": state["user_id"],
+                        "userId": state["userId"],
                         "thread_id": state["thread_id"],
                         "action_type": "save_plan",
                         "payload": {"week_start": week_start, "plan": proposed},
@@ -687,7 +812,7 @@ async def plan_agent(state: LearningState):
         except Exception as e:
             logger.error("approval insert error: %s", e)
 
-    is_update = state.get("intent") == "update" or bool(state.get("roadmap_id"))
+    is_update = state.get("intent") == "update" or bool(state.get("roadmapId"))
     action_type = "update_plan" if is_update else "save_plan"
 
     decision = interrupt(
@@ -707,27 +832,27 @@ async def plan_agent(state: LearningState):
         return {"intent": state.get("intent", "plan"), "plan_status": "rejected"}
 
     # Approved: for update reuse the existing plan row; for new plan create one.
-    roadmap_id = state.get("roadmap_id") if is_update else None
-    if not roadmap_id:
+    roadmapId = state.get("roadmapId") if is_update else None
+    if not roadmapId:
         try:
             plan_row = (
                 supabase.table("meal_plans")
                 .insert(
                     {
-                        "user": state["user_id"],
+                        "user": state["userId"],
                         "week_start": week_start,
                         "status": "approved",
                     }
                 )
                 .execute()
             )
-            roadmap_id = plan_row.data[0]["id"] if plan_row.data else None
+            roadmapId = plan_row.data[0]["id"] if plan_row.data else None
         except Exception as e:
             logger.error("meal_plan insert error: %s", e)
     else:
         # Clear existing slots so we start fresh with the new proposal.
         try:
-            supabase.table("meal_slots").delete().eq("roadmap_id", roadmap_id).execute()
+            supabase.table("meal_slots").delete().eq("roadmapId", roadmapId).execute()
         except Exception as e:
             logger.error("meal_slots clear error: %s", e)
 
@@ -735,19 +860,19 @@ async def plan_agent(state: LearningState):
     merged = list(
         dict.fromkeys(existing + [s["recipe_name"] for s in (proposed or [])])
     )
-    await remember(state["user_id"], "liked_dishes", merged)
+    await remember(state["userId"], "liked_dishes", merged)
 
     for slot in proposed or []:
         try:
             supabase.table("meal_slots").upsert(
                 {
-                    "roadmap_id": roadmap_id,
+                    "roadmapId": roadmapId,
                     "day_of_week": slot["day_of_week"],
                     "meal_type": slot["meal_type"].lower(),
                     "recipe_name": slot["recipe_name"],
                     "protein_g": slot["protein_g"],
                 },
-                on_conflict="roadmap_id,day_of_week,meal_type",
+                on_conflict="roadmapId,day_of_week,meal_type",
             ).execute()
         except Exception as e:
             logger.error("slot insert error: %s", e)
@@ -760,17 +885,17 @@ async def plan_agent(state: LearningState):
     return {
         "intent": state.get("intent", "plan"),
         "plan_status": "approved",
-        "roadmap_id": roadmap_id,
+        "roadmapId": roadmapId,
     }
 
 
 async def load_memory(state: LearningState):
-    user_id = state["user_id"]
+    userId = state["userId"]
     memory = {}
 
     try:
         memories = get_db()["memories"]
-        result = memories.find_one({userId: state["user_id"]})
+        result = memories.find_one({userId: state["userId"]})
         if result:
             print(result)
             # memory = {r["key"]: r["value"] for r in rows.data}
@@ -782,20 +907,22 @@ async def load_memory(state: LearningState):
 
 def decide_agent(state: LearningState):
     intent = state.get("intent")
-    if intent == "whats_next":
+    if intent == "create_roadmap":
         return "roadmap_agent"
+    elif intent == "whats_next":
+        return "progress_agent"
     elif intent == "explain":
-        return "query_agent"
-    elif intent == "quiz":
-        return "research_agent"
-    elif intent == "submit_quiz":
-        return "research_agent"
-    elif intent == "find_resources":
-        return "research_agent"
+        return "tutor_agent"
+    # elif intent == "quiz":
+    #     return "research_agent"
+    # elif intent == "submit_quiz":
+    #     return "research_agent"
+    # elif intent == "find_resources":
+    #     return "research_agent"
     elif intent == "update_progress":
         return "roadmap_agent"
     elif intent == "query_roadmap":
-        return "query_agent"
+        return "tutor_agent"
     elif intent == "modify_roadmap":
         return "plan_agent"
     return END
@@ -804,26 +931,26 @@ def decide_agent(state: LearningState):
 graph.add_node("load_memory", load_memory)
 graph.add_node("classify_intent", classify_intent)
 graph.add_node("roadmap_agent", roadmap_agent)
-graph.add_node("query_agent", query_agent)
-graph.add_node("research_agent", research_agent)
+graph.add_node("progress_agent", progress_agent)
+graph.add_node("tutor_agent", tutor_agent)
 graph.add_node("plan_agent", plan_agent)
 graph.add_edge(START, "classify_intent")
 # graph.add_edge("load_memory", "classify_intent")
 graph.add_conditional_edges(
     "classify_intent",
     decide_agent,
-    ["roadmap_agent", "query_agent", "research_agent", "plan_agent", END],
+    ["roadmap_agent", "tutor_agent", "plan_agent", END],
 )
 
 
-async def verify_plan_ownership(roadmap_id: str, user_id: str) -> bool:
+async def verify_plan_ownership(roadmapId: str, userId: str) -> bool:
     """Return True if the plan exists and belongs to the user."""
     try:
         res = (
             supabase.table("meal_plans")
             .select("id")
-            .eq("id", roadmap_id)
-            .eq("user", user_id)
+            .eq("id", roadmapId)
+            .eq("user", userId)
             .maybe_single()
             .execute()
         )
@@ -841,23 +968,6 @@ async def ask(
 ):
     agent = request.app.state.agent
 
-    if body.roadmap_id and not await verify_plan_ownership(
-        body.roadmap_id, current_user["uid"]
-    ):
-        raise HTTPException(
-            status_code=403, detail="You do not have access to this plan."
-        )
-
-    # "update" intent requires a roadmap_id to know which plan to regenerate.
-    # Do a lightweight pre-check so we fail fast with a readable error.
-    text_lower = body.text.lower()
-    update_keywords = ("update", "change", "redo", "modify", "regenerate")
-    if any(kw in text_lower for kw in update_keywords) and not body.roadmap_id:
-        raise HTTPException(
-            status_code=400,
-            detail="Provide roadmap_id to update an existing plan.",
-        )
-
     thread_id = body.thread_id or str(uuid.uuid4())
     config = {"configurable": {"thread_id": thread_id}}
     _excluded = {"_id", "expires_at", "password_hash"}
@@ -865,9 +975,9 @@ async def ask(
     result = await agent.ainvoke(
         {
             "query": body.text,
-            "user_id": current_user["uid"],
+            "userId": current_user["uid"],
             "thread_id": thread_id,
-            "roadmap_id": body.roadmap_id,
+            "roadmapId": body.roadmapId,
             "current_user": user_data,
         },
         config=config,
@@ -890,7 +1000,7 @@ class ApproveRequest(BaseModel):
     decision: Literal["approved", "rejected"]
 
 
-@mealRouter.post("/approve")
+@mealRouter.post("/approvals")
 async def approve(
     body: ApproveRequest,
     request: Request,
@@ -901,24 +1011,20 @@ async def approve(
 
     # The thread/approval must belong to the caller (prevents IDOR where a user
     # approves or rejects someone else's pending plan by guessing the thread_id).
+    approval = None
     try:
-        approval = (
-            supabase.table("approvals")
-            .select("id, user_id")
-            .eq("thread_id", body.thread_id)
-            .eq("status", "pending")
-            .maybe_single()
-            .execute()
+        approval = await get_db()["approvals"].find_one(
+            {"threadId": body.thread_id, "status": "pending"}
         )
+        logger.info("approval found: %s", approval)
     except Exception as e:
         logger.error("approval ownership lookup error: %s", e)
-        approval = None
 
-    if not approval or not approval.data:
+    if not approval:
         raise HTTPException(
             status_code=404, detail="No pending approval for this thread."
         )
-    if approval.data["user_id"] != current_user["uid"]:
+    if approval["userId"] != current_user["uid"]:
         raise HTTPException(
             status_code=403, detail="You do not have access to this approval."
         )
@@ -935,7 +1041,7 @@ async def approve(
 
 
 class ResolveConflictRequest(BaseModel):
-    roadmap_id: str
+    roadmapId: str
     recipe: str  # the suggested (or chosen) dish to act on
     day_of_week: int
     meal_type: Literal["dinner", "lunch", "breakfast"]
@@ -952,7 +1058,7 @@ async def resolve_conflict(
     accept → log the suggested recipe into the slot.
     reject → record the suggestion as a disliked dish so it isn't offered again.
     """
-    if not await verify_plan_ownership(body.roadmap_id, current_user["uid"]):
+    if not await verify_plan_ownership(body.roadmapId, current_user["uid"]):
         raise HTTPException(
             status_code=403, detail="You do not have access to this plan."
         )
@@ -962,7 +1068,7 @@ async def resolve_conflict(
         return {"status": "done", "log_status": "rejected"}
 
     slot = await log_recipe_to_slot(
-        body.roadmap_id, body.recipe, body.day_of_week, body.meal_type
+        body.roadmapId, body.recipe, body.day_of_week, body.meal_type
     )
     return {"status": "done", "log_status": "logged", "slot": slot}
 
@@ -994,12 +1100,12 @@ async def delete_disliked(
     return {"status": "done", "result": merged}
 
 
-@mealRouter.get("/meal-slots/{roadmap_id}")
+@mealRouter.get("/meal-slots/{roadmapId}")
 async def get_meal_slots(
-    roadmap_id: str,
+    roadmapId: str,
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
-    if not await verify_plan_ownership(roadmap_id, current_user["uid"]):
+    if not await verify_plan_ownership(roadmapId, current_user["uid"]):
         raise HTTPException(
             status_code=403, detail="You do not have access to this plan."
         )
@@ -1007,65 +1113,65 @@ async def get_meal_slots(
         res = (
             supabase.table("meal_slots")
             .select("id, day_of_week, meal_type, recipe_id, recipe_name, protein_g")
-            .eq("roadmap_id", roadmap_id)
+            .eq("roadmapId", roadmapId)
             .order("day_of_week")
             .order("meal_type")
             .execute()
         )
-        return {"status": "done", "roadmap_id": roadmap_id, "slots": res.data or []}
+        return {"status": "done", "roadmapId": roadmapId, "slots": res.data or []}
     except Exception as e:
         logger.error("get_meal_slots error: %s", e)
         raise HTTPException(status_code=500, detail="Failed to fetch meal slots.")
 
 
-@mealRouter.get("/grocery-list/{roadmap_id}")
+@mealRouter.get("/grocery-list/{roadmapId}")
 async def grocery_list(
-    roadmap_id: str,
+    roadmapId: str,
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
-    if not await verify_plan_ownership(roadmap_id, current_user["uid"]):
+    if not await verify_plan_ownership(roadmapId, current_user["uid"]):
         raise HTTPException(
             status_code=403, detail="You do not have access to this plan."
         )
-    items = await build_grocery_list(roadmap_id)
-    return {"status": "done", "roadmap_id": roadmap_id, "result": items}
+    items = await build_grocery_list(roadmapId)
+    return {"status": "done", "roadmapId": roadmapId, "result": items}
 
 
-@mealRouter.get("/approve")
+@mealRouter.get("/approvals")
 async def list_approvals(current_user: Annotated[dict, Depends(get_current_user)]):
-    user_id = current_user["uid"]
-    logger.info("--- %s", user_id)
+    userId = current_user["uid"]
+    logger.info("--- %s", userId)
     try:
-        result = (
-            supabase.table("approvals")
-            .select("*")
-            .eq("user_id", user_id)
-            .eq("status", "pending")
-            .execute()
-        )
-        logger.info("%s", result)
+        cursor = get_db()["approvals"].find({"userId": userId, "status": "pending"})
+        docs = await cursor.to_list(None)
+        for doc in docs:
+            doc["_id"] = str(doc["_id"])
+        logger.info("approvals found: %s", len(docs))
 
-        if not result.data:
+        if not docs:
             return {"status": "done", "message": "no approval found", "result": []}
 
-        return {"status": "done", "result": result.data}
+        return {"status": "done", "result": docs}
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@mealRouter.get("/plans")
+@mealRouter.get("/roadmaps")
 async def getPlans(current_user: Annotated[dict, Depends(get_current_user)]):
-    user_id = current_user["uid"]
-    logger.info("--- %s", user_id)
+    userId = current_user["uid"]
+    logger.info("--- %s", userId)
     try:
-        result = supabase.table("meal_plans").select("*").eq("user", user_id).execute()
-        logger.info("%s", result)
+        cursor = get_db()["roadmaps"].find({"userId": userId})
+        docs = await cursor.to_list(None)
+        for doc in docs:
+            doc["_id"] = str(doc["_id"])
+        logger.info("approvals found: %s", len(docs))
 
-        if not result.data:
-            return {"status": "done", "message": "plans not found", "result": []}
+        if not docs:
+            return {"status": "done", "message": "roadmaps not found", "result": []}
 
-        return {"status": "done", "message": "plans fetched", "result": result.data}
+        return {"status": "done", "message": "roadmaps fetched", "result": docs}
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1082,10 +1188,10 @@ class Trigger(BaseModel):
 
 @mealRouter.post("/toggle-trigger")
 async def toggle_trigger(current_user: Annotated[dict, Depends(get_current_user)]):
-    user_id = current_user["uid"]
+    userId = current_user["uid"]
 
     try:
-        result = supabase.table("triggers").select("*").eq("user_id", user_id).execute()
+        result = supabase.table("triggers").select("*").eq("userId", userId).execute()
         if result and result.data:
             for t in result.data or []:
                 supabase.table("triggers").update({"enabled": not t["enabled"]}).eq(
@@ -1094,7 +1200,7 @@ async def toggle_trigger(current_user: Annotated[dict, Depends(get_current_user)
         else:
             supabase.table("triggers").insert(
                 {
-                    "user_id": user_id,
+                    "userId": userId,
                     "name": "plan my schedule",
                     "schedule": "30 18 * * 0",
                     "action_type": "schedule",
@@ -1136,9 +1242,9 @@ async def run_triggers(agent):
             latest = (
                 supabase.table("meal_plans")
                 .select("id, meal_slots(*)")
-                .eq("user", t["user_id"])
+                .eq("user", t["userId"])
                 .eq("status", "approved")
-                .order("created_at", desc=True)
+                .order("createdAt", desc=True)
                 .limit(1)
                 .maybe_single()
                 .execute()
@@ -1149,7 +1255,7 @@ async def run_triggers(agent):
                 slots = latest.data.get("meal_slots", [])
                 proposed = [
                     {
-                        "roadmap_id": latest.data["id"],
+                        "roadmapId": latest.data["id"],
                         "day_of_week": s["day_of_week"],
                         "meal_type": s["meal_type"],
                         "recipe_name": s["recipe_name"],
@@ -1159,7 +1265,7 @@ async def run_triggers(agent):
                 ]
                 supabase.table("approvals").insert(
                     {
-                        "user_id": t["user_id"],
+                        "userId": t["userId"],
                         "thread_id": thread_id,
                         "action_type": "save_plan",
                         "payload": {"week_start": week_start, "plan": proposed},
@@ -1167,7 +1273,7 @@ async def run_triggers(agent):
                     }
                 ).execute()
                 logger.info(
-                    f"[trigger] Approval created for existing plan, user={t['user_id']}"
+                    f"[trigger] Approval created for existing plan, user={t['userId']}"
                 )
             else:
                 # No existing plan: invoke agent to generate one
@@ -1175,18 +1281,18 @@ async def run_triggers(agent):
                 agent_result = await agent.ainvoke(
                     {
                         "query": "Plan my meals for next week",
-                        "user_id": t["user_id"],
+                        "userId": t["userId"],
                         "thread_id": thread_id,
                     },
                     config=config,
                 )
                 if "__interrupt__" in agent_result:
                     logger.info(
-                        f"[trigger] New plan approval created, user={t['user_id']}"
+                        f"[trigger] New plan approval created, user={t['userId']}"
                     )
 
             supabase.table("triggers").update({"last_run_at": now.isoformat()}).eq(
                 "id", t["id"]
             ).execute()
         except Exception as e:
-            logger.error(f"[trigger] error for user={t.get('user_id')}: {e}")
+            logger.error(f"[trigger] error for user={t.get('userId')}: {e}")
